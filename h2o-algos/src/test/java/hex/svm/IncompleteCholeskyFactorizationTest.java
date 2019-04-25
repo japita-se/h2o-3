@@ -25,7 +25,8 @@ public class IncompleteCholeskyFactorizationTest extends TestUtil  {
       expected = parse_test_file("./smalldata/splice/splice_icf3.csv");
       assertTrue(compareFrames(expected, icf, 1e-6));
     } finally {
-      expected.delete();
+      if (expected != null)
+        expected.delete();
       if (fr != null)
         fr.delete();
       if (icf != null)
@@ -47,6 +48,9 @@ public class IncompleteCholeskyFactorizationTest extends TestUtil  {
     public void run() {
       Kernel kernel = new GaussianKernel(0.01);
       _icf = IncompleteCholeskyFactorization.icf(_fr, "C1", kernel, 3, 1e-6);
+      
+      PrimalDualIPM.solve(_icf, _fr.vec("C1"), new PrimalDualIPM.Params());
+      
     }
   }
   
