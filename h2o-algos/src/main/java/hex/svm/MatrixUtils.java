@@ -76,7 +76,7 @@ public class MatrixUtils {
     }
   }
 
-  void cholBackwardSub(LLMatrix a, double[] b, double[] x) {
+  static void cholBackwardSub(LLMatrix a, double[] b, double[] x) {
     int dim = a.dim();
     for (int k = dim - 1; k >= 0; k--) {
       double tmp = b[k];
@@ -87,7 +87,7 @@ public class MatrixUtils {
     }
   }
 
-  void cholForwardSub(LLMatrix a, double[] b, double[] x) {
+  static void cholForwardSub(LLMatrix a, double[] b, double[] x) {
     int dim = a.dim();
     for (int k = 0; k < dim; ++k) {
       double tmp = b[k];

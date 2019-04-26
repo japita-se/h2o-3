@@ -10,52 +10,146 @@ import water.util.Log;
 
 public class PrimalDualIPM {
   
-  static void solve(Frame rbicf, Vec response, Params params) {
+  static void solve(Frame rbicf, Vec label, Params params) {
+    checkLabel(label);
+
     final double c_pos = params._weight_positive * params._hyper_parm;
     final double c_neg = params._weight_negative * params._hyper_parm;
     final long num_constraints = rbicf.numRows() * 2; 
 
-    Vec x = response.makeZero();
-    Frame initFrame = new InitTask(c_pos, c_neg).doAll(new byte[]{Vec.T_NUM, Vec.T_NUM}, response).outputFrame();
+    Vec x = label.makeZero();
+    Frame initFrame = new InitTask(c_pos, c_neg).doAll(new byte[]{Vec.T_NUM, Vec.T_NUM}, label).outputFrame();
     Vec la = initFrame.vec(0);
     Vec xi = initFrame.vec(1);
 
     double nu = 0;
     
     for (int iter = 0; iter < params._max_iter; iter++) {
-      double eta = computeSurrogateGap(c_pos, c_neg, response, x, la, xi);
+      double eta = computeSurrogateGap(c_pos, c_neg, label, x, la, xi);
       double t = (params._mu_factor * num_constraints) / eta;
       Log.debug("sgap: " + eta + " t: " + t);
 
       Vec z = computePartialZ(rbicf, x, params._tradeoff);
-      CheckConvergenceTask cct = new CheckConvergenceTask(nu).doAll(z, response, la, xi);
-      if (cct._resp < params._feasible_threshold && cct._resd < params._feasible_threshold 
-              && eta < params._sgap_bound) {
+      CheckConvergenceTask cct = new CheckConvergenceTask(nu).doAll(z, label, la, x, xi);
+      if (cct._resp <= params._feasible_threshold && cct._resd <= params._feasible_threshold 
+              && eta <= params._sgap_bound) {
         break;
       }
       
       Frame working = new UpdateVarsTask(c_pos, c_neg, params._x_epsilon, t)
-              .doAll(new byte[]{Vec.T_NUM, Vec.T_NUM, Vec.T_NUM, Vec.T_NUM, Vec.T_NUM}, z, response, la, x, xi)
+              .doAll(new byte[]{Vec.T_NUM, Vec.T_NUM, Vec.T_NUM, Vec.T_NUM, Vec.T_NUM}, z, label, la, x, xi)
               .outputFrame(new String[]{"tlx", "tux", "xilx", "laux", "d"}, null); 
 
       LLMatrix icfA = MatrixUtils.productMM(rbicf, working.vec("d"));
       LLMatrix lra = MatrixUtils.cf(icfA);
 
-      System.out.println(lra);
-      // double dnu = computeDeltaNu(rbicf, working.vec("d"), response, z, x, lra);
+      final double dnu = computeDeltaNu(rbicf, working.vec("d"), label, z, x, lra);
+      Vec dx = computeDeltaX(rbicf, working.vec("d"), label, dnu, lra, z);
+
+      LineSearchTask lst = new LineSearchTask(c_pos, c_neg).doAll(new byte[]{Vec.T_NUM, Vec.T_NUM}, label, working.vec("tlx"), working.vec("tux"), working.vec("xilx"), working.vec("laux"), xi, la, dx, x);
+      Frame lstFrame = lst.outputFrame(new String[]{"dxi", "dla"}, null);
+
+      new MakeStepTask(lst._ap, lst._ad).doAll(x, dx, xi, lstFrame.vec("dxi"), la, lstFrame.vec("dla"));
+
+      nu += lst._ad * dnu;
     }
   }
 
+  static class MakeStepTask extends MRTask<MakeStepTask> {
+    double _ap;
+    double _ad;
+
+    MakeStepTask(double ap, double ad) {
+      _ap = ap;
+      _ad = ad;
+    }
+    
+    @Override
+    public void map(Chunk[] cs) {
+      map(cs[0], cs[1], cs[2], cs[3], cs[4], cs[5]);
+    }
+
+    public void map(Chunk x, Chunk dx, Chunk xi, Chunk dxi, Chunk la, Chunk dla) {
+      for (int i = 0; i < x._len; i++) {
+        x.set(i, x.atd(i) + (_ap * dx.atd(i)));
+        xi.set(i, xi.atd(i) + (_ad * dxi.atd(i)));
+        la.set(i, la.atd(i) + (_ad * dla.atd(i)));
+      }
+    }
+    
+  }
+
+  static class LineSearchTask extends MRTask<LineSearchTask> {
+    private final double _c_pos;
+    private final double _c_neg;
+
+    private double _ap;
+    private double _ad;
+    
+    LineSearchTask(double c_pos, double c_neg) {
+      _c_pos = c_pos;
+      _c_neg = c_neg;
+    }
+
+    public void map(Chunk[] cs, NewChunk[] ncs) {
+      map(cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], cs[6], cs[7], cs[8], ncs[0], ncs[1]);
+    }
+
+    private void map(Chunk label, Chunk tlx, Chunk tux, Chunk xilx, Chunk laux, Chunk xi, Chunk la, Chunk dx, Chunk x, NewChunk dxiC, NewChunk dlaC) {
+      double[] dxi = new double[tlx._len];
+      double[] dla = new double[tlx._len];
+      for (int i = 0; i < dxi.length; ++i) {
+        dxi[i] = tlx.atd(i) - xilx.atd(i) * dx.atd(i) - xi.atd(i);
+        dxiC.addNum(dxi[i]);
+        dla[i] = tux.atd(i) + laux.atd(i) * dx.atd(i) - la.atd(i);
+        dlaC.addNum(dla[i]);
+      }
+      double ap = Double.MAX_VALUE;
+      double ad = Double.MAX_VALUE;
+      for (int i = 0; i < dxi.length; i++) {
+        double c = (label.atd(i) > 0.0) ? _c_pos : _c_neg;
+        if (dx.atd(i) > 0.0) {
+          ap = Math.min(ap, (c - x.atd(i)) / dx.atd(i));
+        }
+        if (dx.atd(i) < 0.0) {
+          ap = Math.min(ap, -x.atd(i)/dx.atd(i));
+        }
+        if (dxi[i] < 0.0) {
+          ad = Math.min(ad, -xi.atd(i) / dxi[i]);
+        }
+        if (dla[i] < 0.0) {
+          ad = Math.min(ad, -la.atd(i) / dla[i]);
+        }
+      }
+      _ap = ap;
+      _ad = ad;
+    }
+
+    @Override
+    public void reduce(LineSearchTask mrt) {
+      _ap = Math.min(_ap, mrt._ap);
+      _ad = Math.min(_ad, mrt._ad);
+    }
+
+    @Override
+    public void postGlobal() {
+      _ap = Math.min(_ap, 1.0) * 0.99;
+      _ad = Math.min(_ad, 1.0) * 0.99;
+    }
+  }
+  
+  private static void checkLabel(Vec label) {
+    if (label.min() != -1 || label.max() != 1)
+      throw new IllegalArgumentException("Expected a binary response encoded as +1/-1");
+  }
+  
   static class UpdateVarsTask extends MRTask<UpdateVarsTask> {
     private final double _c_pos;
     private final double _c_neg;
     private final double _epsilon_x;
     private final double _t;
 
-    // OUT
-    private double _sum;
-
-    public UpdateVarsTask(double c_pos, double c_neg, double epsilon_x, double t) {
+    UpdateVarsTask(double c_pos, double c_neg, double epsilon_x, double t) {
       _c_pos = c_pos;
       _c_neg = c_neg;
       _epsilon_x = epsilon_x;
@@ -101,17 +195,17 @@ public class PrimalDualIPM {
 
     @Override
     public void map(Chunk[] cs) {
-      map(cs[0], cs[1], cs[2], cs[3]);
+      map(cs[0], cs[1], cs[2], cs[3], cs[4]);
     }
 
-    public void map(Chunk z, Chunk label, Chunk la, Chunk xi) {
+    public void map(Chunk z, Chunk label, Chunk la, Chunk x, Chunk xi) {
       for (int i = 0; i < z._len; i++) {
         double zi = z.atd(i);
         zi += _nu * (label.atd(i) > 0 ? 1 : -1) - 1.0;
         double temp = la.atd(i) - xi.atd(i) + zi;
         z.set(i, zi);
         _resd += temp * temp;
-        _resp += label.atd(i) * xi.atd(i);
+        _resp += label.atd(i) * x.atd(i);
       }
     }
 
@@ -128,7 +222,7 @@ public class PrimalDualIPM {
     }
   }
 
-  static Vec computePartialZ(Frame rbicf, Vec x, final double tradeoff) {
+  private static Vec computePartialZ(Frame rbicf, Vec x, final double tradeoff) {
     final Vec[] vecs = ArrayUtils.append(rbicf.vecs(), x);
     final double vz[] = new MatrixMultVecTask().doAll(vecs)._row;
     return new MRTask() {
@@ -168,41 +262,8 @@ public class PrimalDualIPM {
     public void reduce(MatrixMultVecTask mrt) {
       ArrayUtils.add(_row, mrt._row);
     }
-
-    /*
-        register int i, j;
-  int p = icf.GetNumCols();
-  double *vz = new double[p];
-  double *vzpart = new double[p];
-  // form vz = V^T*x
-  memset(vzpart, 0, sizeof(vzpart[0]) * p);
-  double sum;
-  for (j = 0; j < p; ++j) {
-    sum = 0.0;
-    for (i = 0; i < local_num_rows; ++i) {
-      sum += icf.Get(i, j) * x[i];
-    }
-    vzpart[j] = sum;
-  }
-  ParallelInterface *mpi = ParallelInterface::GetParallelInterface();
-  mpi->AllReduce(vzpart, vz, p, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-  // form z = V*vz
-  for (i = 0; i < local_num_rows; ++i) {
-    // Get a piece of inner product
-    sum = 0.0;
-    for (j = 0; j < p; ++j) {
-      sum += icf.Get(i, j) * vz[j];
-    }
-    z[i] = sum - to * x[i];
   }
 
-  delete [] vz;
-  delete [] vzpart;
-  return 0;
-       */
-  } 
-  
   private static double computeSurrogateGap(double c_pos, double c_neg, Vec response, Vec x, Vec la, Vec xi) {
     return new SurrogateGapTask(c_pos, c_neg).doAll(new Vec[]{response, x, la, xi})._sum;
   }
@@ -214,7 +275,7 @@ public class PrimalDualIPM {
     // OUT
     private double _sum;
 
-    public SurrogateGapTask(double c_pos, double c_neg) {
+    SurrogateGapTask(double c_pos, double c_neg) {
       _c_pos = c_pos;
       _c_neg = c_neg;
     }
@@ -246,7 +307,7 @@ public class PrimalDualIPM {
     private final double _c_pos;
     private final double _c_neg;
 
-    public InitTask(double c_pos, double c_neg) {
+    InitTask(double c_pos, double c_neg) {
       _c_pos = c_pos;
       _c_neg = c_neg;
     }
@@ -261,9 +322,106 @@ public class PrimalDualIPM {
       }
     }
   }
+
+  private static Vec computeDeltaX(Frame icf, Vec d, Vec label, final double dnu, LLMatrix lra, Vec z) {
+    Vec tz = new MRTask() {
+      @Override
+      public void map(Chunk z, Chunk label, NewChunk tz) {
+        for (int i = 0; i < z._len; i++) {
+          tz.addNum(z.atd(i) - dnu * label.atd(i));
+        }
+      }
+    }.doAll(Vec.T_NUM, z, label).outputFrame().anyVec();
+    return linearSolveViaICFCol(icf, d, tz, lra);
+  }
   
+  private static double computeDeltaNu(Frame icf, Vec d, Vec label, Vec z, Vec x, LLMatrix lra) {
+    Vec tw = linearSolveViaICFCol(icf, d, z, lra);
+    Vec tl = linearSolveViaICFCol(icf, d, label, lra);
+    DeltaNuTask dnt = new DeltaNuTask().doAll(label, tw, tl, x);
+    return dnt._sum1 / dnt._sum2;
+  }
+  
+  static class DeltaNuTask extends MRTask<DeltaNuTask> {
+    double _sum1;
+    double _sum2;
+
+    @Override
+    public void map(Chunk[] cs) {
+      map(cs[0], cs[1], cs[2], cs[3]);
+    }
+
+    public void map(Chunk label, Chunk tw, Chunk tl, Chunk x) {
+      for (int i = 0; i < label._len; i++) {
+        _sum1 += label.atd(i) * (tw.atd(i) + x.atd(i));
+        _sum2 += label.atd(i) * tl.atd(i);
+      }
+    }
+
+    @Override
+    public void reduce(DeltaNuTask mrt) {
+      _sum1 += mrt._sum1;
+      _sum2 += mrt._sum2;
+    }
+  }
+  
+  private static Vec linearSolveViaICFCol(Frame icf, Vec d, Vec b, LLMatrix lra) {
+    LSHelper1 lsh = new LSHelper1().doAll(Vec.T_NUM, ArrayUtils.append(icf.vecs(), d, b));
+    Vec x = lsh.outputFrame().anyVec();
+    final double[] vz = lsh._row;
+    double[] ty = new double[vz.length];
+    MatrixUtils.cholForwardSub(lra, vz, ty);
+    MatrixUtils.cholBackwardSub(lra, ty, vz);
+    new MRTask() {
+      @Override
+      public void map(Chunk[] cs) {
+        final int p = cs.length - 2;
+        Chunk d = cs[p];
+        Chunk x = cs[p + 1];
+        for (int i = 0; i < cs[0]._len; i++) {
+          double s = 0.0;
+          for (int j = 0; j < p; j++) {
+            s += cs[j].atd(i) * vz[j] * d.atd(i);
+          }
+          x.set(i, x.atd(i) - s);
+        }
+      }
+    }.doAll(ArrayUtils.append(icf.vecs(), d, x));
+    return x;
+  }
+
+  static class LSHelper1 extends MRTask<LSHelper1> {
+    double[] _row;
+    @Override
+    public void map(Chunk[] cs, NewChunk nc) {
+      final int p = cs.length - 2;
+      _row = new double[p];
+      Chunk d = cs[p];
+      Chunk b = cs[p + 1];
+      double[] z = new double[cs[0]._len];
+      for (int i = 0; i < z.length; i++) {
+        z[i] = b.atd(i) * d.atd(i);
+      }
+      for (int j = 0; j < p; j++) {
+        double s = 0.0;
+        for (int i = 0; i < z.length; i++) {
+          s += cs[j].atd(i) * z[i];
+        }
+        _row[j] = s;
+      }
+      for (double zi : z) {
+        nc.addNum(zi);
+      }
+    }
+
+    @Override
+    public void reduce(LSHelper1 mrt) {
+      ArrayUtils.add(_row, mrt._row);
+    }
+  }
+
   static class Params {
-    int _max_iter = 1;
+    int _max_iter = 30;
     double _weight_positive = 1.0;
     double _weight_negative = 1.0;
     double _hyper_parm = 1.0;
