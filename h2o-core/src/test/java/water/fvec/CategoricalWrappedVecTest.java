@@ -2,10 +2,7 @@ package water.fvec;
 
 import org.junit.*;
 
-import water.Keyed;
-import water.Lockable;
-import water.Scope;
-import water.TestUtil;
+import water.*;
 import water.util.Log;
 import water.util.PrettyPrint;
 import water.util.RandomUtils;
@@ -13,6 +10,8 @@ import water.util.RandomUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+
+import static org.junit.Assert.assertNull;
 
 public class CategoricalWrappedVecTest extends TestUtil {
   @BeforeClass static public void setup() {  stall_till_cloudsize(1); }
@@ -103,4 +102,22 @@ public class CategoricalWrappedVecTest extends TestUtil {
     int[] mapping = CategoricalWrappedVec.computeMap(colDomain, modelDomain);
     Assert.assertArrayEquals("Mapping differs",  expectedMapping, mapping);
   }
+
+  @Test
+  public void testRemove() {
+    try {
+      Scope.enter();
+      Frame f = new TestFrameBuilder().withVecTypes(Vec.T_CAT)
+              .withDataForCol(0, ar("a", "c", "c"))
+              .build();
+      Vec masterVec = f.anyVec();
+      Vec wrappedVec = new CategoricalWrappedVec(masterVec.group().addVec(), masterVec._rowLayout, new String[]{"a", "b", "c"}, masterVec._key, true);
+      wrappedVec.remove();
+      assertNull(masterVec._key.get());
+    } finally {
+      Scope.exit();
+    }
+  }
+
+
 }

@@ -8,6 +8,7 @@ import water.*;
 abstract class WrappedVec extends Vec {
   /** A key for underlying vector which contains values which are transformed by this vector. */
   final Key<Vec> _masterVecKey;
+  final boolean _cascadeDelete;
   /** Cached instances of underlying vector. */
   transient Vec _masterVec;
 
@@ -16,8 +17,12 @@ abstract class WrappedVec extends Vec {
     this(key, rowLayout, null, masterVecKey);
   }
   public WrappedVec(Key<Vec> key, int rowLayout, String[] domain, Key<Vec> masterVecKey) {
+    this(key, rowLayout, domain, masterVecKey, false);
+  }
+  public WrappedVec(Key<Vec> key, int rowLayout, String[] domain, Key<Vec> masterVecKey, boolean cascadeDelete) {
     super(key, rowLayout, domain);
     _masterVecKey = masterVecKey;
+    _cascadeDelete = cascadeDelete;
   }
 
   public Vec masterVec() {
@@ -26,4 +31,16 @@ abstract class WrappedVec extends Vec {
 
   /** Map from chunk-index to Chunk.  These wrappers are making custom Chunks */
   public abstract Chunk chunkForChunkIdx(int cidx);
+
+  @Override
+  public Futures remove_impl(Futures fs) {
+    super.remove_impl(fs);
+    if (_cascadeDelete && _masterVecKey != null) {
+      Vec masterVec = _masterVecKey.get();
+      if (masterVec != null) {
+        masterVec.remove(fs);
+      }
+    }
+    return fs;
+  }
 }

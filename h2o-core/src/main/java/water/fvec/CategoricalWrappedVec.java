@@ -30,7 +30,11 @@ public class CategoricalWrappedVec extends WrappedVec {
 
   /** Main constructor: convert from one categorical to another */
   public CategoricalWrappedVec(Key key, int rowLayout, String[] toDomain, Key masterVecKey) {
-    super(key, rowLayout, masterVecKey);
+    this(key, rowLayout, toDomain, masterVecKey, false);
+  }
+
+  public CategoricalWrappedVec(Key key, int rowLayout, String[] toDomain, Key masterVecKey, boolean cascadeDelete) {
+    super(key, rowLayout, null, masterVecKey, cascadeDelete);
     computeMap(masterVec().domain(),toDomain,masterVec().isBad());
     DKV.put(this);
   }
@@ -67,7 +71,7 @@ public class CategoricalWrappedVec extends WrappedVec {
    *  Extra values in the 'from' domain appear, in-order in the 'from' domain, at the end.
    *  @return mapping
    */
-  void computeMap( String[] from, String[] to, boolean fromIsBad ) {
+  private void computeMap( String[] from, String[] to, boolean fromIsBad ) {
     // Identity? Build the cheapo non-map
     if( from==to || Arrays.equals(from,to) ) {
       _map = ArrayUtils.seq(0,to.length);
@@ -190,6 +194,7 @@ public class CategoricalWrappedVec extends WrappedVec {
     @Override protected final void initFromBytes () { throw water.H2O.fail(); }
     @Override public boolean hasNA() { return _c.hasNA(); }
 
+    @Override
     public Chunk deepCopy() {
       return extractRows(new NewChunk(this),0,_c._len).compress();
     }
